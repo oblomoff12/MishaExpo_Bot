@@ -3,7 +3,7 @@
 from enum import Enum
 
 db_file = "database.vdb"
-token = 'Введи сюда свой токен'
+token = 'token here'
 
 
 class States(Enum):

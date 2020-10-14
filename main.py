@@ -1,163 +1,213 @@
+# -*- coding: utf-8 -*-
+# -*- Создание чат-бота для компании MishaExpo -*-
+
+# Подготовочка
 import config
 import re
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 from tabulate import tabulate
-from datetime import datetime
-import telebot
 from random import randint
+from oauthclient.oauth2api import oauth2api
+from oauthclient.credentialutil import credentialutil
+from oauthclient.model.model import environment
+from urllib.parse import unquote
+from telegram import (ReplyKeyboardMarkup, ReplyKeyboardRemove)
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, ConversationHandler)
+from dateutil.parser import parse, ParserError
+from datetime import datetime, timezone
+from 
 
-#  Бот MishaExpo
-import dbworker
+# Класс, собирающий все данные пользователя
+class RequestStat:
+    def _init_(self):
+        self.goodid = 0
+        self.start_date = datetime()
+        self.finish_date = datetime()
 
-bot = telebot.TeleBot(config.token)
-
-#Поля, с которыми работает Бот
-name = None
-goods_id = None
-period_start = None
-period_end = None
-pict = [
-    'https://sun1-87.userapi.com/mWs_pmwCyeNpCNEYNrkT1NSyh_xzOGHryvkL8g/txAQThIQsYc.jpg',
-    'https://static.tildacdn.com/tild6232-3235-4932-b933-663436363633/_.png'
-    ]
-
-#Начало диалога
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    state = dbworker.get_current_state(message.chat.id)
-    if state == config.States.S_ENTER_NAME.value:
-        bot.send_message(message.chat.id,
-                         "Привет. Мне кажется, мы уже начинали наш с тобой диалог, и кто-то обещал отправить своё имя, но так и не сделал этого :( Жду...")
-    elif state == config.States.S_ENTER_GOODS_ID.value:
-        reply_ENTER_GOODS_ID = "Привет, " + dbworker.get_current_state(str(message.chat.id) + 'name')+"! Мне кажется, мы уже начинали наш с тобой диалог и в прошлый раз мы остановились на идентификаторе товара :( Жду..."
-        bot.send_message(message.chat.id, reply_ENTER_GOODS_ID)
-    elif state == config.States.S_PERIOD_START.value:
-        reply_PERIOD_START = "Привет, " + dbworker.get_current_state(str(message.chat.id) + 'name') + "! Мне кажется, мы уже начинали наш с тобой диалог и в прошлый раз мы остановились на вводе даты начала периода, по которому нужно сформировать статистику :( Жду..."
-        bot.send_message(message.chat.id,reply_PERIOD_START)
-    elif state == config.States.S_PERIOD_END.value:
-        reply_PERIOD_END = "Привет, " + dbworker.get_current_state(str(message.chat.id) + 'name') + "! Мне кажется, мы уже начинали наш с тобой диалог и в прошлый раз мы остановились на вводе даты окончания периода, по которому нужно сформировать статистику :( Жду..."
-        bot.send_message(message.chat.id, reply_PERIOD_END)
-    elif state == config.States.S_END.value:
-        reply_END = "Привет, " + dbworker.get_current_state(str(message.chat.id) + 'name') + "! Мы уже как-то виделись с тобой. Давай попробуем еще разок получить нужную тебе информацию. Введи идентификационный номер своего товара. Напомню, что в нем могут быть только цифры"
-        bot.send_message(message.chat.id, reply_END)
-        dbworker.set_state(message.chat.id, config.States.S_ENTER_GOODS_ID.value)
-    else:  # Под "остальным" понимаем состояние "0" - начало диалога
-        bot.send_photo(message.chat.id, pict[randint(0, 1)])
-        bot.send_message(message.chat.id, "Привет!\n"
-                                      "Меня зовут MishaExpo_bot, и я - твой помощник в получении статистики по товему товару в магазине Ebay :) \n\n"
-                                      "В рамках нашего общения тебе нужно будет указать:\n /GOODS_ID (Идентификатор твоего товара, состоящий из ____ цифр, известных только тебе)\n"
-                                      "/PERIOD_START - начало периода, за который понадобится статистика.\n"
-                                      '/PERIOD_END - окончание периода, за который понадобится статистика.\n\n'
-                                      "Введи /info, чтобы узнать, кто я и чем я могу тебе помочь.\n"
-                                      "Введи /commands, чтобы ознакомиться с доступными командами.\n"
-                                      "Введи /reset, чтобы сбросить предыдущие состояния и начать заново.\n\n"
-                                      "Давай знакомиться! Как тебя зовут?")
-        dbworker.set_state(message.chat.id, config.States.S_ENTER_NAME.value)
-
-# Получение и сохранение пользовательских параметров для дальнейшего использования
-def getting_name(message):
-    name = message.text
-    dbworker.set_property(str(message.chat.id)+"name", name)
+# Словарик со значениями данных пользователя
+StatRequests = dict()
 
 
-def getting_goods_id(message):
-    goods_id = message.text
-    dbworker.set_property(str(message.chat.id)+"goods_id", goods_id)
+# Работа с oauth2
+oauth2api_inst = oauth2api()
+
+user_access_token = None
+
+credentialutil.load('ebay-config.yaml')
+
+scopes = ['https://api.ebay.com/oauth/api_scope',
+          'https://api.ebay.com/oauth/api_scope/buy.order.readonly',
+          'https://api.ebay.com/oauth/api_scope/buy.guest.order',
+          'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.marketing',
+          'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.inventory',
+          'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.account',
+          'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+          'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.marketplace.insights.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.catalog.readonly',
+          'https://api.ebay.com/oauth/api_scope/buy.shopping.cart',
+          'https://api.ebay.com/oauth/api_scope/buy.offer.auction',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.email.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.phone.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.address.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.name.readonly',
+          'https://api.ebay.com/oauth/api_scope/commerce.identity.status.readonly',
+          'https://api.ebay.com/oauth/api_scope/sell.finances',
+          'https://api.ebay.com/oauth/api_scope/sell.item.draft',
+          'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
+          'https://api.ebay.com/oauth/api_scope/sell.item']
+
+# создание функции,"дергающей" получение user_token'а
+def get_user_token():
+    # тут будет получения этого кода
+    url_code = "v%5E1.1%23i%5E1%23f%5E0%23r%5E1%23p%5E3%23I%5E3%23t%5EUl41XzEwOjFCRjIyMEVERjZEN0FGQTNGOTNENTBGQjI1Mzk4RUU0XzJfMSNFXjEyODQ%3D"
+    code = unquote(url_code)
+    temp_access_token = oauth2api_inst.exchange_code_for_access_token(environment.SANDBOX, code)
+    # проверка на ошибку
+    global user_access_token
+    user_access_token = temp_access_token
+
+# Создание глобальной переменной для user_token'а
+def get_user_access_token():
+    global user_access_token
+    if (user_access_token is None):
+      get_user_token()
+    # elif user_access_token.token_expiry > datetime.utcnow():
+    # refresh_access_token()
+    return user_access_token
 
 
-def getting_period_start(message):
-    period_start = datetime.strptime(message.text, '%d.%m.%Y').date()
-    dbworker.set_property(str(message.chat.id)+"period_start", period_start)
+# создание функции,"дергающей" получение refresh_user_token'а
+def refresh_access_token():
+   refresh_access_token = oauth2api_inst.get_access_token(environment.SANDBOX, user_access_token.refresh_token, scopes)
+   #тут надо обновить поля токена если нет ошибки
 
 
-def getting_period_end(message):
-    period_end = datetime.strptime(message.text, '%d.%m.%Y').date()
-    dbworker.set_property(str(message.chat.id)+"period_end", period_end)
+#  Непосредственно, Каха (Бот MishaExpo-помощник)
 
 
-# Сброс состояния, возврат к началу диалога
-@bot.message_handler(commands=["reset"])
-def cmd_reset(message):
-    bot.send_message(message.chat.id, "Что ж, начнём по-новой. Итак, напомни, как тебя зовут?")
-    dbworker.set_state(message.chat.id, config.States.S_ENTER_NAME.value)
+GOODID, START_DATE, FINISH_DATE, PERFORM = range(4)
 
+def start(update, context):
 
-@bot.message_handler(commands=["info"])
-def cmd_info(message):
-    bot.send_message(message.chat.id, " Метод /info расскажет тебе о том, что я умею.\n"
-                                      "Для начала мы познакомимся и я попрошу ввести свой ник или Имя (как тебе будет удобно).\n"
-                                      "На втором этапе я попрошу тебя ввести дату начала периода, за который требуется сформировать аналитику, \n"
-                                      "на третьем - дату окончания этого периода.\n"
-                                      "И, наконец, на четвертом этапе выдам тебе результат.\n"
-                                      "Для того, чтобы начать заново, можно воспользоваться командой /reset")
-    bot.send_message(message.chat.id, "Ряд комментариев:\n"
-                                      "1. Я не буду ругаться на формат \"имени\". Твое имя или никнейм могут быть как реальными, так и не совсем\n"
-                                      "2. А вот с введением идентификатора товара - буду. Если ты введешь нечисловое значение, то я выдам ошибку, поскольку идентификатор товара может быть только цифровым.\n"
-                                      "3. К датам у меня чуть меньше претензий. Я умею их обрабатывать.\n"
-                                      "4. Еще я умею запоминать команды, на которых мы остановились в прошлый раз.\n"
-                                      "Здорово, если мы подружимся друг с другом, и я стану твоим незаменимым помощником")
-    bot.send_message(message.chat.id, "Ниже команды, которыми ты можешь пользоваться: \n"
-                                      "Ввод команды /commands расскажет тебе о существующих командах.\n"
-                                      "Ввод команды /reset начнет диалог с начала.")
+    update.message.reply_text\
+        (
+        "Привет!\n"
+        "Меня зовут MishaExpo_bot, и я - твой помощник в получении статистики по товему товару в магазине Ebay :) \n\n"
+        "В рамках нашего общения тебе нужно будет указать:\n"
+        "свой GOODS_ID (Идентификатор твоего товара, состоящий из ____ цифр, известных только тебе)\n"
+        )
 
-@bot.message_handler(commands=["commands"])
-def cmd_commands(message):
-    bot.send_message(message.chat.id, "/reset - возврат в начало диалога (этап \"знакомства\"); \n"
-                                      "/start - \"стирание\" всех данных, и начало диалога;\n"
-                                      "/info - общая информация о том, что я могу делать;\n"
-                                      "/commands - общие сведения о командах.")
-#Ввод имени/знакомство с юзером
-@bot.message_handler(func=lambda message: dbworker.get_current_state(message.chat.id) == config.States.S_ENTER_NAME.value)
-def user_entering_name(message):
-    getting_name (message)
-    bot.send_message(message.chat.id, "Отличное(-ый) имя (никнейм), запомню!\n"
-                                      "А ведь, наверное, меня могли звать так же...\n\n"
-                                      "А теперь давай ближе к делу: введи твой GOODS_ID. Это уникальный идентификатор твоего товара, состоящий из ___ цифр.")
-    dbworker.set_state(message.chat.id, config.States.S_ENTER_GOODS_ID.value)
-
+    return GOODID
 
 # Ввод ID товара
-@bot.message_handler(func=lambda message: dbworker.get_current_state(message.chat.id) == config.States.S_ENTER_GOODS_ID.value)
-def user_entering_goods_id(message):
-    getting_goods_id(message)
-    if not message.text.isdigit():
-        bot.send_message(message.chat.id, "Что-то пошло не так... Убедись, что введены исключительно цифры")
-        return
-    else:
-        bot.send_message(message.chat.id, "Все здорово. Теперь введи дату начала периода, за который нужна аналитика, в формате дд.мм.гггг")
-    dbworker.set_state(message.chat.id, config.States.S_PERIOD_START.value)
+def user_entering_good_id(update, context):
 
+    message = update.message
+    if not message.text.isdigit():
+        message.reply_text("Что-то пошло не так... Убедись, что введены исключительно цифры")
+
+        return GOODID
+    else:
+        message.reply_text("Все здорово. Теперь введи дату начала периода, за который нужна аналитика, в формате дд.мм.гггг")
+    StatRequests[message.chat.id] = RequestStat()
+    StatRequests[message.chat.id].goodid = message.text
+    return START_DATE
+
+
+def parse_date(str_date):
+  try:
+    datetime = parse(str_date)
+    return datetime
+  except ParserError:
+      print("Oops!  That was no date.  Try again...")
 
 # Ввод начала периода
-@bot.message_handler(func=lambda message: dbworker.get_current_state(message.chat.id) == config.States.S_PERIOD_START.value)
-def user_entering_period_start(message):
-    pattern = re.findall(r'(?<!\d)(?:0?[1-9]|[12][0-9]|3[01])[\.](?:0?[1-9]|1[0-2])[\.]\d{4}', message.text)
-    if not message.text in pattern:
-        bot.send_message(message.chat.id,
-                         "Мне кажется, что-то не так с датой. Попробуй еще раз. Напомню про формат: дд.мм.гггг. И никак иначе")
-        return
-    else:
-        getting_period_start(message)
-        bot.send_message(message.chat.id,
-                         "Отлично. Ты шустришь. Надо бы потренироваться в том, чтобы успевать за тобой... А теперь в том же формате введи дату окончания периода, за который нужна аналитика (в формате дд.мм.гггг)")
-    dbworker.set_state(message.chat.id, config.States.S_PERIOD_END.value)
+def user_entering_period_start(update, context):
+    message = update.message
+    str_date = update.message.text
+    maybe_date = parse_date(str_date)
+    if maybe_date is None:
+        message.reply_text ("Че-т не так")
+        return START_DATE
+    if datetime.now() < maybe_date:
+        message.reply_text("Че-т не так. Ты в будущем, чувак!")
+        return START_DATE
+    message.reply_text("Отлично. Ты шустришь. Надо бы потренироваться в том, чтобы успевать за тобой... А теперь введи дату окончания периода, за который нужна аналитика, в формате дд.мм.гггг")
+    StatRequests[message.chat.id].start_date = maybe_date
+    return FINISH_DATE
+
+# Ввод окончания периода
+def user_entering_period_finish(update, context):
+    message = update.message
+    str_date = update.message.text
+    maybe_date = parse_date(str_date)
+    if maybe_date is None:
+        message.reply_text("Че-т не так")
+        return FINISH_DATE
+    if datetime.now() < maybe_date:
+        message.reply_text("Че-т не так. Ты в будущем, чувак!")
+        return FINISH_DATE
+    if StatRequests[message.chat.id].start_date > maybe_date:
+        message.reply_text("Че-т не так. Дта должна быть чуть раньше")
+        return FINISH_DATE
+    message.reply_text(
+                "Ну, что ж. Здорово было пообщаться. Дай мне немного времени для того, чтобы отработать запрос, и увидимся в следующий раз!"
+                )
+    StatRequests[message.chat.id].finish_date = maybe_date
+    return ConversationHandler.END
 
 
-# Окончание диалога
-@bot.message_handler(func=lambda message: dbworker.get_current_state(message.chat.id) == config.States.S_PERIOD_END.value)
-def user_end_dialog(message):
-    pattern = re.findall(r'(?<!\d)(?:0?[1-9]|[12][0-9]|3[01])[\.](?:0?[1-9]|1[0-2])[\.]\d{4}', message.text)
-    if not message.text in pattern:
-        bot.send_message(message.chat.id,
-                         "Мне кажется, что-то не так с датой. Попробуй еще раз. Напомню про формат: дд.мм.гггг. И никак иначе")
-        return
-    else:
-        getting_period_end(message)
-        bot.send_message(message.chat.id, "Ну, что ж. Здорово было пообщаться. Дай мне немного времени для того, чтобы отработать запрос, и увидимся в следующий раз!")
-    dbworker.set_state(message.chat.id, config.States.S_END.value)
+def cancel(update, context):
+    user = update.message.from_user
+    update.message.reply_text('Bye! I hope we can talk again some day.',
+                              reply_markup=ReplyKeyboardRemove())
+
+    return ConversationHandler.END  # Это будет в самом конце
+
+def main():
+    # Create the Updater and pass it your bot's token.
+    # Make sure to set use_context=True to use the new context based callbacks
+    # Post version 12 this will no longer be necessary
+    updater = Updater(config.token, use_context=True)
+
+    # Get the dispatcher to register handlers
+    dp = updater.dispatcher
+
+    # Add conversation handler with the states GENDER, PHOTO, LOCATION and BIO
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+
+        states={
+            GOODID: [MessageHandler(Filters.text & ~Filters.command, user_entering_good_id)],
+
+            START_DATE: [MessageHandler(Filters.text & ~Filters.command, user_entering_period_start)],
+
+            FINISH_DATE: [MessageHandler(Filters.text & ~Filters.command, user_entering_period_finish)]
+
+            },
+
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    dp.add_handler(conv_handler)
+
+    # Start the Bot
+    updater.start_polling()
+
+    # Run the bot until you press Ctrl-C or the process receives SIGINT,
+    # SIGTERM or SIGABRT. This should be used most of the time, since
+    # start_polling() is non-blocking and will stop the bot gracefully.
+    updater.idle()
+
 
 
 if __name__ == "__main__":
-    bot.infinity_polling()
+    main()
